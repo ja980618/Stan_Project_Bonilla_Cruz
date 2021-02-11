@@ -1,0 +1,149 @@
+---
+title: "Beta-Binomial Models in Stan"
+author: "Emma Brennan-Wydra"
+commentator: "Bonilla Cruz José Armando"
+date: "April 19, 2019"
+output: html_document
+---
+Lo que buscamos con el siguiente código es dar una inferencia bayesiana de la probapilidad de obtener una buena propina al trabajar como taxista en la ciudad de la NY, dado que el el pasajero abordó a la unidad en alguno de los (250) distritos que comoponen a esta ciudad
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+```
+Antes que nada tenemos que importar los datos con los que vamos a trabajar
+```{r}
+# read in data
+binomial_csv <- read.csv("data/beta_binomial_data.csv")
+head(binomial_csv)
+```
+En el anterior Data frame podemos encontar los distintos distritos de la Ciudad de NY (K,1:249), el número de viajes realizados (count) y cuantos de estos viajes tuvieron una propina alta (heavy_tipper_no) 
+
+Recordemos que para trabajar con RStan necesitamos listas, por lo que crearemos estos objetos.
+
+De los últimos 10 distritos (estos no está ordenados) no se tiene información suficiente, por lo que no haremos una inferencia de los parámetros, es por eso que solo nos quedamos con 240
+```{r}
+# create data list for Stan model
+data_binomial <- list(
+  K = 240,
+  n = binomial_csv$counts,#total
+  y = binomial_csv$heavy_tipper_no #evento de interés
+)
+```
+
+Ajustaremos una distribución binomial al número de viajes que  recibieron una buena propina, donde la la probabilidad de obtener una buena propina es una variable aleatoria p ~ beta(1.41,4.28)
+
+Al tener número de viajes realizados  por cada cluster y el número de estos que obtuvieron una buena propina, es inevitable no pensar en una variable aleatoria binomial que dependa de estos parámetros, por lo que ese será el primer modelo.
+y ~ binomial(n,p)
+
+## Fixed parameters for Beta population prior: Beta(1.41,4.28) 
+
+```{r}
+# fit Stan model
+fit_binomial <- stan(file = 'stan-files/NYC_BetaBinomial.stan', data = data_binomial)
+```
+Veamos las estimaciones y sus intervalos de credibilidad al 95%
+```{r}
+# checking output
+print(fit_binomial, probs = c(0.025, 0.5, 0.975))
+```
+Por cada distrito tenmos una probabilidad estimada y su intervalo de credibilidad al 95%.
+En el siguiente csv vamos a guardar todas las simulaciones
+```{r}
+# write posterior samples to csv
+samples_binomial_fixed_params <- as.data.frame(fit_binomial)
+write.csv(samples_binomial_fixed_params, file = "samples_binomial_fixed_params.csv")
+```
+Como la función print no nos arroja toda la información, guardaremos esta información en un csv para poder visulaizarla
+```{r}
+# create array of posterior means
+samples <- rstan::extract(fit_binomial)#Extraemos las estimaciones del modelo
+thetas = array(0, 240)#Creamos un array que se llame thetas
+for(k in 1:240){
+  this_theta = mean(samples$theta[,k])
+  thetas[k] = this_theta
+}
+
+# make a new dataframe of posterior means
+x <- binomial_csv$k
+y <- thetas
+x_name <- "cluster"
+y_name <- "theta"
+#Ordenamos las estimaciones de forma descendente
+df <- data.frame(x,y)
+names(df) <- c(x_name,y_name)
+df_sorted <- df[order(-y),]
+```
+Guardamos el data frame ordenando a los distrititos por su probabilidad de obtener una buena propina, dado que el viaje proviene de este distrito
+```{r}
+# write this new dataframe to a csv
+write.csv(df_sorted, file = "theta_post_means_binomial_fixed_params.csv")
+```
+PAra un análisis de los resultados nos concentraremos en los 5 distritos en dónde esta probabilidad es mayor y donde es menor
+```{r}
+head(df_sorted, n=5) # top five clusters for big tips
+tail(df_sorted, n=5) # bottom five clusters for big tips
+```
+Queremos ver la densidad de las thetas(probabilidades) estimadas para las 5 estimaciones más grandes y más pequeñas
+```{r}
+# plot the top and bottom 5
+plot(fit_binomial, show_density = TRUE, pars = 
+       c("theta[224]", "theta[189]", "theta[190]","theta[195]", "theta[240]",
+         "theta[169]", "theta[201]", "theta[167]", "theta[197]", "theta[177]"))
+```
+Como podemos observar, las densidades de las 5 estimaciones más grandes se parecen demasiado, podriamos decir que las distribuciones son simétrimas respecto a la estimación. Lo mismo pasa con las 5 estimaciones más pequeñas, son muy parecidas entre sí, pero estas no parecen ser simétricas y tienen un sesgo positivo, es decir, que la moda de esta distribuciones se encuentra a la izquierda de la estimación.
+También podemos recalcacar que hay algunos distritos en los que esta distribución aposteriori pareciera empalmarse, sino es que parece ser la misma, podriamos dedicarnos a ver que distritos hacen eso y recategorizar para tener un modelo más sencillo.
+
+
+## Unknown parameters for Beta population prior (hierarchical rat tumor model from BDA3)
+Modelo dos, en el que supondremos parámetros desconocidos para la theta (alpha y beta), este modelo se basa en un modelo  Jerarquico para ratas con tumos desarrollado por Gelman et al. (2013), Lo comentamos más a fondo en el archivo de stan.
+```{r}
+# fit the hierarchical model
+fit_binomial2 <- stan(file = 'stan-files/NYC_BetaBinomial2.stan', data = data_binomial, control = list(max_treedepth = 12))
+```
+Procedermos a hacer lo mismo que hicimos con el modelo uno, guardar las simulaciones un csv, asi como las estimaciones e intervalos de credibilidad así theta, así como de los hiper parámetros y concluiremos con un pequeño análisis de estas estimaciones y una comparación de los modelos.
+```{r}
+# checking output
+print(fit_binomial2, pars=c("alpha","beta","theta"), probs = c(0.025, 0.5, 0.975))
+```
+Guardemos las simulaciones en un csv
+```{r}
+# write posterior samples to csv
+samples_binomial_unknown_params <- as.data.frame(fit_binomial2)
+write.csv(samples_binomial_unknown_params, file = "samples_binomial_unknown_params.csv")
+```
+Extraemos las estimaciones y las ordemas de manera desecendiente
+```{r}
+samples2 <- rstan::extract(fit_binomial2)
+thetas = array(0, 240)
+for(k in 1:240){
+  this_theta = mean(samples2$theta[,k])
+  thetas[k] = this_theta
+}
+
+x <- binomial_csv$k
+y <- thetas
+x_name <- "cluster"
+y_name <- "theta"
+
+df2 <- data.frame(x,y)
+names(df2) <- c(x_name,y_name)
+df_sorted2 <- df2[order(-y),]
+```
+guardamos las estimaciones en un csv
+```{r}
+write.csv(df_sorted2, file = "theta_post_means_binomial_unknown_params.csv")
+```
+Al igual que con el primer modelo, vamos a fijarnos en  las 10 estimaciones más grandes y más pequeñas 
+```{r}
+head(df_sorted2, n=10) # top ten clusters for big tips
+tail(df_sorted2, n=10) # bottom ten clusters for big tips (worst is last)
+```
+de estas estimaciones, sólo nos vamos a quedar con las 5 más grandes y las 5 más pequeñas y veamos sus densidades
+```{r}
+# plot the top and bottom 5 clusters
+plot(fit_binomial2, show_density = TRUE, pars = 
+       c("theta[26]", "theta[3]", "theta[1]","theta[35]", "theta[119]",
+         "theta[47]", "theta[42]", "theta[79]","theta[73]", "theta[59]"))
+```
+Con este modelo podemos ver que el rango en el que se encuentran nuestras estimaciones es mucho más pequeño que con el modelo 1.De hecho nuestra estimación más grade es 0.28 y la más pqequeña es  0.19. Cuando en el primer modelo el valor estimado más grande es 0.44 y el más pequeño es 0.10. Esto debido a que los intervalos de credibilidad son mucho más compactos.
+Por otro lado, podemos observar que todos las densidades parecieran ser las mismas (simétricas) y en donde no podemos distinguir entre media, mediana y moda. De hecho parecieran no tener sesgos y ser platicurticas.
