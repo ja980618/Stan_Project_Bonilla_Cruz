@@ -1,0 +1,184 @@
+---
+title: "Normal Models in Stan"
+author: "Emma Brennan-Wydra"
+commentator: "Bonilla Cruz José Armando"
+date: "April 19, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rstan)
+```
+La base de datos contiene 60,000 observaciones, una por cada viaje realizado.
+Por cada observación(renglones) tenemos los siguientes datos; El distrito(k), el id_vendor(id del taxista), fecha y hora exacta de la parada como del arribo, latitud y longitud al iniciar y al finalizar el viaje, la distancia recorrida, el número de pasajeros, el tipo de pago, la tarifa cobrada, los extras, las propinas y el monto total.
+Pero, para este proyecto sólo utilizaremos tres  columnas, el distrito(k) la tarifa(fare_amount) y la propina(tip_amount)
+Para cada cluster(k 1:250) está será nuestra variable independiente, y la variable respuesta será el monto de la tarifa más la propina
+```{r}
+# read in data
+nyc_taxi_data <- read.csv("data/nyc_taxi_data.csv", header=TRUE)
+
+# create data list for Stan model
+data_normal <-list(N = length(nyc_taxi_data$k),
+            K = 250,
+            x = nyc_taxi_data$k,
+            y = nyc_taxi_data$fare_amount + nyc_taxi_data$tip_amount)
+```
+
+## Hierarchical model: Normal/Inv-Gamma population priors
+Vamos a hacer una inferencia bayesian para el precio de un viaje en taxi por el (k-ésimo) distrito en la ciudad de NY y vamos a suponer que la media de cada cluster tiene una distribución  apriori mu ~ normal(15, 86), la  sigma ~ inv_gamma(5, 56) y que nuestras observaciones el precio del taxi dado un distrito se ditribuyen normal ~ (mu,sigma)
+
+
+```{r}
+# fit the model
+fit_normal <- stan(file = 'stan-files/NYC_NormalInvGamma.stan', data = data_normal)
+```
+En el siguiente chunck podemos observar las estimaciones de nuestros parámetros, podemos notar que sson 500 renglones y eso es porque por cada cluster tenemos dos estimaciones, la media y la varianza y por cada estimación tenemos su intervalo de credibilidad al 95%
+```{r}
+# checking output
+print(fit_normal, probs = c(0.025, 0.5, 0.975)) 
+```
+Guardemos todas las simulaciones en el siguiente csv
+```{r}
+samples_normal_fixed_params <- as.data.frame(fit_normal)
+write.csv(samples_normal_fixed_params, file = "samples_normal_fixed_params.csv")
+```
+Como las simulaciones per se no son útilies, nos quedaremos con las estimaciones, que esas sí pueden aportar información
+```{r}
+samples <- rstan::extract(fit_normal)#Extraemos las simulaciones
+#Creamos dos vectores de la misma longitud, uno para las medias y otro para las desvianciones
+mu_means = array(0, 250)
+cluster = array(0, 250)
+#Extraemos las medias
+for(k in 1:250){
+  this_mean = mean(samples$mu[,k])
+  mu_means[k] = this_mean
+  cluster[k] = k
+}
+#Extraemos las sigmas
+sigma_means = array(0, 250)
+for(k in 1:250){
+  this_mean = mean(samples$sigma[,k])
+  sigma_means[k] = this_mean
+  cluster[k] = k
+}
+#Creamos un data frame con tres columnas, que son las de interés, el cluster, la media y la sigma, por lo que vamos a termar con 250 renglones
+x <- cluster
+y <- mu_means
+z <- sigma_means
+x_name <- "cluster"
+y_name <- "mu_post_mean"
+z_name <- "sigma_post_mean"
+#ordenamos el anterior df mencionado respecto a las medias de forma descendiente
+df2 <- data.frame(x,y,z)
+names(df2) <- c(x_name,y_name,z_name)
+df_sorted2 <- df2[order(-y),]
+```
+Guardemos nuestras estimaciones en un csv
+```{r}
+write.csv(df_sorted2, file = "mu_sigma_post_means_normal_fixed_params.csv")
+```
+Como queremos hacer un análisis de los distritos en los que en promedio es más caro/barato tomar un taxi, nos quedaremos con los primeros 5 y los últimos 5 renglones de el anterior data frame
+```{r}
+head(df_sorted2, n=5) # top five clusters for big tips plus fares
+tail(df_sorted2, n=5) # bottom five clusters for big tips plus fares
+```
+Veamos un plot de las densidades en estos casos estremos, en los que la media de estos distritos es o muy grande o muy pequeñas
+```{r}
+plot(fit_normal, show_density = TRUE, pars = 
+       c("mu[201]", "mu[14]", "mu[30]", "mu[92]", "mu[9]",
+         "mu[218]","mu[160]", "mu[207]", "mu[80]", "mu[39]"))
+
+```
+
+Como podemos observar, la posterior de todas nuestras estimaciones es una normal y eso es predecible ya que utilizamos distribuciones conjugadas, por lo que es conrguente que los histograms nos salieran de esta manera, otra cosa que podemos notar es que no hay diferencia significativa entre las los 5 distritos con la media más baja de NY, por lo que podriamos pensar en una recategorización en la que podamos agrupar distritos con tarifas similares y conseguir un modelo más sencillo sin tantos clusters.
+
+Pero recordemos que sólo graficamos la densidad posterior de la media, no de las sigmas, así que no sería tan correcto hacer eso, sin antes echarle un vistazo a las sigmas
+
+
+### Hierarchical Normal Model with Normal and Inverse Gamma Priors (Unknown Parameters)
+Con este segundo modelo perseguimos lo mismo; Dar una inferencia bayesian para el precio de un viaje en taxi por el (k-ésimo) distrito en la ciudad de NY, y haremos unos pequeños cambios a la nuestras distribuciones apriori, primero supondremos que nuestra variable respuesta y (precio por viaje)~ Normal(mu, sigma), pero esta vez no le daremos unas distribuciones totalmente explícitas a la media (mu), ni a la desviación estandar (sigma), sino que estas a su vez tienen distribuciones apriori, es decir.
+mu ~ Normal(mu0,musigma0), donde mu0 ~ Normal(15,10),musigma0 ~in_gamma(0.1,0.1) 
+sigma ~inv_gamma(alpha,beta), donde alpha ~ Normal(0,10), beta  ~ Normal(0,10)
+```{r}
+# fit the model
+fit_normal2 <- stan(file = 'stan-files/NYC_NormalInvGamma2.stan', data = data_normal)
+```
+Revisemos la inferencia de nuestras estimaciones
+```{r}
+# checking output
+print(fit_normal2, probs = c(0.025, 0.5, 0.975)) 
+summary(fit_normal2)
+```
+En el anterior chunck podemos observar nuestras estimaciones, tanto para cada cluster mu[k], como para los parámetros de sus apriori mu0 y musigma0, no podemos ver todas las estimaciones ya que al ser muchas (tenemos dos por cada cluster) además tenemos la de alpha y beta
+
+Cómo son las estimaciones de estos hiperparámetros, veamoslo en la siguiente linea
+```{r}
+# checking output for hyperparameters
+print(fit_normal2, pars=c('alpha','beta','mu0','musigma0'), probs = c(0.025, 0.5, 0.975)) 
+```
+Con el output de este chunck tenemos que si hubieramos utilizado el primer modelo con la apriori mu ~ Normal(15.40,3.86) y sigma ~ inv_gamma(7.27,67.82) que son las mejores opciones para apriori según los datos, hubieramos tenido una mejor inferencia y muy parecida a la que estamos teniendo con este segundo modelo.
+
+Tendrán una correlacón nuestos hiper parámetros
+```{r}
+# autocorrelation plot for hyperparameters
+stan_ac(fit_normal2, pars=c('alpha','beta','mu0','musigma0'))
+```
+Gráficamente no podemos notar una correlación significativa.
+
+Guardaremos nuestras simulaciones en un csv
+```{r}
+# write posterior samples to a csv
+samples_normal_unknown_params <- as.data.frame(fit_normal2)
+write.csv(samples_normal_unknown_params, file = "samples_normal_unknown_params.csv")
+```
+
+Al igual que con el primer modelo, construiremos un data frame en el que vamos a visualizar la estimación de la medias y la sigma por cluster, al tener 250 cluster, necesitaremos 250 renglones
+```{r}
+# extract posterior means for mean fare and variance in each cluster
+samples <- rstan::extract(fit_normal2)
+mu_means = array(0, 250)
+cluster = array(0, 250)
+for(k in 1:250){
+  this_mean = mean(samples$mu[,k])
+  mu_means[k] = this_mean
+  cluster[k] = k
+}
+
+sigma_means = array(0, 250)
+for(k in 1:250){
+  this_mean = mean(samples$sigma[,k])
+  sigma_means[k] = this_mean
+  cluster[k] = k
+}
+
+# create a new data frame 
+x <- cluster
+y <- mu_means
+z <- sigma_means
+x_name <- "cluster"
+y_name <- "mu_post_mean"
+z_name <- "sigma_post_mean"
+#Al igual que con el primer modelo, orderames esta tabla respecto a la media por cluster de manera descendiente
+df <- data.frame(x,y,z)
+names(df) <- c(x_name,y_name,z_name)
+df_sorted <- df[order(-y),]
+```
+Guardamos nuestras estimaciones en un csv
+```{r}
+write.csv(df_sorted, file = "mu_sigma_post_means_normal_unknown_params.csv")
+```
+Para un análisi de nuestras estimaciones, nos quedaremos con las estimaciones más grandes y más pequeñas de la media por cluster
+```{r}
+head(df_sorted, n=5) # top five clusters for tips plus fares
+tail(df_sorted, n=5) # bottom five clusters for big tips plus fares
+```
+
+```{r}
+# plotting the top 5 and bottom 5 clusters
+plot(fit_normal, show_density = TRUE, pars = 
+       c("mu[14]", "mu[62]", "mu[110]", "mu[11]", "mu[136]",
+         "mu[101]","mu[188]", "mu[236]", "mu[43]", "mu[185]"))
+```
+Con este modelo podemos observar que las estimaciones son mucho mejores, ya que hay algunos distritos en los que la media converge a deltas de dirac que es lo que esperarimaos al tener tantas observaciones (recordemos que tenemos 60,000) que la media fuera un valor cte.
+E incluso con esto podriamos decir que no sería del todo correcto re-agrupar los distritos y formar categorias con esto, ya que sí podemos ver una diferencia significativa en nuestras estimaciones. Y tener una estimación por cada distrito sería mucho más informativo.
